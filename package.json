@@ -1,0 +1,9 @@
+{
+  "name": "xieyihui",
+  "version": "0.8.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "xieyihui",
+  "name": "歇一会",
+  "version": "0.8.1",
+  "description": "温柔又执着的休息提醒助手。强制模式会用当前助手的性格和最近对话实时劝你休息，还会划走按钮、加时、记欠账、攒成就。",
+  "trust": "full-access",
+  "activationEvents": [
+    "onStartup"
+  ],
+  "install": {
+    "defaultEnabled": true
+  },
+  "capabilities": [
+    "session",
+    "agent",
+    "model",
+    "model.sample",
+    "network.fetch"
+  ],
+  "network": {
+    "allowedHosts": ["*"],
+    "defaultTimeoutMs": 30000
+  },
+  "contributes": {
+    "page": {
+      "title": "歇一会",
+      "route": "/page",
+      "icon": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 1 7.92 12.446A9 9 0 1 1 12 2.992z'/><path d='M12 9v4'/><path d='M12 17h.01'/></svg>"
+    },
+    "routes": [
+      "./routes/rest.js"
+    ],
+    "tools": [
+      "./tools/settings.js",
+      "./tools/status.js"
+    ]
+  },
+  "interface": {
+    "displayName": "歇一会",
+    "shortDescription": "定时休息提醒，有温度的摸鱼小管家",
+    "category": "Productivity",
+    "author": "歇一会 contributors",
+    "license": "MIT"
+  }
+}

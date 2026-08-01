@@ -1,0 +1,22 @@
+# 运行时数据（用户配置/成就/台词档案，不应入库）
+config.json
+records.json
+archive.json
+data.json
+data.json.tmp
+data.json.bak
+
+# 备份与缓存
+_backups/
+__pycache__/
+*.pyc
+*.tmp
+*.md.bak
+
+# 开发内部文档（含本机路径与开发细节，不随仓库发布）
+PROJECT_LOG.md
+
+# 系统文件
+.DS_Store
+Thumbs.db
+node_modules/
