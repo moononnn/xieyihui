@@ -1,7 +1,7 @@
 {
   "id": "xieyihui",
   "name": "歇一会",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "温柔又执着的休息提醒助手。强制模式会用当前助手的性格和最近对话实时劝你休息，还会划走按钮、加时、记欠账、攒成就。",
   "trust": "full-access",
   "activationEvents": [

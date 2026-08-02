@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRoundRobin, PRAISE_REPLIES } from "./replies.js";
-import { writeJsonAtomic } from "./fsutil.js";
+import { readJsonSafe, writeJsonAtomic } from "./fsutil.js";
 
 const RECORDS_FILE = "records.json";
 export const DEBT_PER_SKIP = 10;      // 每次点跳过记 10 秒欠账
@@ -208,9 +208,9 @@ export function defaultRecords() {
 }
 
 export function loadRecords(dataDir, pluginId) {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(recordsPath(dataDir, pluginId), "utf-8"));
-    const base = { ...defaultRecords(), ...parsed };
+  const parsed = readJsonSafe(recordsPath(dataDir, pluginId));
+  if (parsed === undefined) return defaultRecords();
+  const base = { ...defaultRecords(), ...parsed };
     // 成就数据迁移：旧格式数组 → 对象 { id: level }（一次性成就 level=0）
     if (Array.isArray(parsed.unlocked)) {
       base.unlocked = Object.fromEntries(parsed.unlocked.filter(Boolean).map((id) => [id, 0]));
@@ -219,9 +219,6 @@ export function loadRecords(dataDir, pluginId) {
     }
     base.newUnlocked = Array.isArray(parsed.newUnlocked) ? parsed.newUnlocked : [];
     return base;
-  } catch {
-    return defaultRecords();
-  }
 }
 
 export function saveRecords(dataDir, pluginId, records) {

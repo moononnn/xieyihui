@@ -28,7 +28,7 @@ import {
 import { cleanReplyText } from "./replies.js";
 import { extractModelText, readModelConfig, sampleConfiguredModel } from "./model-config.js";
 import { spawn, spawnSync } from "node:child_process";
-import { writeJsonAtomic } from "./fsutil.js";
+import { readJsonSafe, writeJsonAtomic } from "./fsutil.js";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
@@ -71,6 +71,9 @@ const PREFETCH_COUNT_PER_TYPE = 2;
 const PREPARE_BEFORE_SECONDS = 45;
 const REFRESH_INTERVAL_MS = 120000; // 休息期间每 2 分钟补一批文案，避免审美疲劳
 const ENV_CHECK_INTERVAL_MS = 5000; // 环境检测频率：全屏/暂离最多滞后 5 秒识别
+const ENV_CHECK_TIMEOUT_MS = 5000;  // 单次环境检测子进程超时：卡住就杀掉，防止进程堆积
+const ENV_CHECK_MAX_OUTPUT = 4096;  // 环境检测输出上限，防异常输出撑爆内存
+let envCheckRunning = false;        // 环境检测单实例锁：上一轮未结束不重复启动
 
 export function start(ctx) {
   if (started) return;
@@ -98,8 +101,12 @@ export function start(ctx) {
 
 export function restartTick() {
   if (state.config.enableBreaks) {
-    state.phase = STATES.WORKING;
-    startTick();
+    // 休息窗口还开着时保存配置：只更新配置，不重置工作计时（避免休息中改设置让
+    // 下一轮工作倒计时提前开始）；本窗口退出后计时自然按新配置继续。
+    if (state.phase !== STATES.BREAKING) {
+      state.phase = STATES.WORKING;
+      startTick();
+    }
     startEnvMonitor();
   } else {
     if (tickTimer) clearInterval(tickTimer);
@@ -216,6 +223,7 @@ export function shouldPause(config, env) {
 /** 周期环境检测：每几秒跑一次 detect_state.py，结果缓存到 envState */
 function startEnvMonitor() {
   stopEnvMonitor();
+  if (!state.ctx?.pluginDir) return; // ctx 未就绪（测试/启动早期）时不启动检测
   checkEnvState();
   envTimer = setInterval(checkEnvState, ENV_CHECK_INTERVAL_MS);
 }
@@ -226,10 +234,11 @@ function stopEnvMonitor() {
 }
 
 function checkEnvState() {
+  if (envCheckRunning) return; // 上一轮检测还没结束：跳过本轮，避免子进程堆积
+  envCheckRunning = true;
   const script = path.join(state.ctx.pluginDir, "python", "detect_state.py");
   const proc = pySpawn([script], { stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
-  proc.stdout.on("data", (chunk) => { output += chunk.toString(); });
   const apply = () => {
     try {
       const parsed = JSON.parse(output.trim());
@@ -243,8 +252,21 @@ function checkEnvState() {
       // 解析失败：保留旧状态，宁可多等一轮也不误暂停
     }
   };
-  proc.once("close", (code) => { if (code === 0) apply(); });
-  proc.once("error", () => {});
+  const finish = (code) => {
+    envCheckRunning = false;
+    if (code === 0) apply();
+  };
+  proc.stdout.on("data", (chunk) => {
+    if (output.length < ENV_CHECK_MAX_OUTPUT) {
+      output += chunk.toString().slice(0, ENV_CHECK_MAX_OUTPUT - output.length);
+    }
+  });
+  // 超时兑底：检测脚本卡住时强制杀掉，保证下一轮能重新启动
+  const killer = setTimeout(() => {
+    try { proc.kill(); } catch {}
+  }, ENV_CHECK_TIMEOUT_MS);
+  proc.once("close", (code) => { clearTimeout(killer); finish(code); });
+  proc.once("error", () => { clearTimeout(killer); finish(null); });
 }
 
 /** 到点临门检测发现全屏/免打扰时，把结果同步进缓存，让 tick 的暂停逻辑接管等待 */
@@ -301,7 +323,11 @@ async function maybeSpawnBreakWindow() {
   proc.stdout.on("data", (chunk) => { output += chunk.toString(); });
 
   const verdict = await new Promise((resolve) => {
+    let done = false;
     const finishCheck = (code, error = null) => {
+      if (done) return; // 超时与 close 双触发保护：只结算一次
+      done = true;
+      clearTimeout(killer);
       if (error) {
         state.ctx?.log?.warn?.("环境检测失败，仍然弹出休息窗口", { error: error.message });
         resolve("go");
@@ -316,6 +342,11 @@ async function maybeSpawnBreakWindow() {
         resolve("go");
       }
     };
+    // 超时兑底：检测脚本卡住时强制杀掉并继续弹窗，避免休息永远等不到
+    const killer = setTimeout(() => {
+      try { proc.kill(); } catch {}
+      finishCheck(null, new Error("环境检测超时"));
+    }, ENV_CHECK_TIMEOUT_MS);
     proc.once("close", (code) => { finishCheck(code); });
     proc.once("error", (error) => { finishCheck(null, error); });
   });
@@ -378,7 +409,8 @@ async function spawnBreakWindow() {
     breakProcess.on("exit", (code) => {
       if (code === 1) state.skippedCount += 1;
       else state.skippedCount = 0;
-      state.phase = STATES.WORKING;
+      // 休息窗口关闭后按当前开关状态决定下一步：总开关被关掉时保持暂停态
+      state.phase = state.config.enableBreaks ? STATES.WORKING : STATES.IDLE;
       breakProcess = null;
       settleWindowOnExit(code);
       activeBreakContext = null;
@@ -413,7 +445,7 @@ async function spawnBreakWindow() {
 /** 窗口退出后的兜底结算：结算请求已处理过的窗口跳过，防止重复计数 */
 function settleWindowOnExit(exitCode) {
   const summary = readLatestSummary();
-  if (!summary || settledWindowIds.has(summary.windowId)) return;
+  if (!summary || !shouldSettleWindow(summary.windowId, settledWindowIds)) return;
   const durationSec = Math.round((Date.now() - windowStartAt) / 1000);
   const event = {
     windowId: summary.windowId,
@@ -434,6 +466,14 @@ function settleWindowOnExit(exitCode) {
     const summaryPath = path.join(ipcDir, `summary-${summary.windowId}.json`);
     if (fs.existsSync(summaryPath)) fs.unlinkSync(summaryPath);
   } catch {}
+}
+
+/**
+ * 结算幂等检查（纯函数，便于测试）：
+ * 窗口 ID 为空时照常结算（历史兑底行为）；非空时已结算过则跳过，防止重复计数。
+ */
+export function shouldSettleWindow(windowId, settledSet) {
+  return !Boolean(windowId) || !settledSet.has(windowId);
 }
 
 /** 记录已结算窗口 ID；超容量后清掉最旧的一半（Set 按插入序迭代） */
@@ -531,7 +571,7 @@ async function processReplyRequest(processingPath) {
     return;
   }
 
-  // 结算请求：休息完成，给夸夸 + 成就
+  // 结算请求：休息完成，给夸夸 + 成就（幂等：同一窗口已结算过则只回响应，不重复计数）
   if (request.action === "completed") {
     const durationSec = Math.max(0, Number(request.durationSec) || 0);
     const event = {
@@ -544,19 +584,28 @@ async function processReplyRequest(processingPath) {
       paidSeconds: activeDebtPaid,
       struggle: Number(request.skips) > 0 || Number(request.evades) > 0,
     };
-    const result = settleRest(state.dataDir, state.pluginId, records, event);
-    if (event.windowId) markSettledWindow(event.windowId);
-    const first = result.newAchievements[0] || null;
-    const achievementName = first
-      ? (first.tierName ? `${first.tierName}·${first.name}` : first.name)
-      : "";
+    let text = "";
+    let achievement = "";
+    let settled = false;
+    if (shouldSettleWindow(event.windowId, settledWindowIds)) {
+      const result = settleRest(state.dataDir, state.pluginId, records, event);
+      if (event.windowId) markSettledWindow(event.windowId);
+      const first = result.newAchievements[0] || null;
+      achievement = first
+        ? (first.tierName ? `${first.tierName}·${first.name}` : first.name)
+        : "";
+      text = achievement ? `${achievement} 达成！${result.praise}` : result.praise;
+    } else {
+      // 已结算（重复提交/异常后兑底路径）：不再重复累计，但照常回响应让窗口正常收尾
+      settled = true;
+      text = "这次休息已经结算过了，好好休息。";
+    }
     const response = {
       ok: true,
       requestId,
-      text: achievementName
-        ? `${achievementName} 达成！${result.praise}`
-        : result.praise,
-      achievement: achievementName,
+      text,
+      achievement,
+      settled,
     };
     writeJsonAtomic(path.join(ipcDir, `response-${requestId}.json`), response);
     try { fs.unlinkSync(processingPath); } catch {}
@@ -784,10 +833,6 @@ function withTimeout(promise, timeoutMs, message = "模型回复超时") {
 }
 
 function loadConfig() {
-  try {
-    const saved = JSON.parse(fs.readFileSync(path.join(state.dataDir, state.pluginId, "config.json"), "utf-8"));
-    state.config = { ...DEFAULT_CONFIG, ...saved };
-  } catch {
-    state.config = { ...DEFAULT_CONFIG };
-  }
+  const saved = readJsonSafe(path.join(state.dataDir, state.pluginId, "config.json"));
+  state.config = { ...DEFAULT_CONFIG, ...(saved || {}) };
 }

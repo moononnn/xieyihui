@@ -105,3 +105,15 @@ test("设置页包含成就按钮、展开面板与对应接口", () => {
   assert.doesNotMatch(routeSource, /id="statsCard"/);
   assert.doesNotMatch(routeSource, /ach-item/);
 });
+
+test("设置页包含检查更新按钮与接口（模式 21）", () => {
+  assert.match(routeSource, /id="updateButton"/);
+  assert.match(routeSource, /id="updateResult"/);
+  assert.match(routeSource, /id="versionChip"/);
+  assert.match(routeSource, /app\.get\("\/api\/check-update"/);
+  assert.match(routeSource, /api\.github\.com\/repos\/moononnn\/xieyihui\/tags/);
+  assert.match(routeSource, /compareVersions/);
+  assert.match(routeSource, /renderCopyBox/);
+  assert.match(routeSource, /downloadUrl/);
+  assert.match(routeSource, /'updateButton'\)\.addEventListener/);
+});

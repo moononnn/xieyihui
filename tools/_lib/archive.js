@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { EFFECT_TYPES } from "./replies.js";
-import { writeJsonAtomic } from "./fsutil.js";
+import { readJsonSafe, writeJsonAtomic } from "./fsutil.js";
 
 const DEFAULT_ARCHIVE_MAX_PER_TYPE = 40;
 const ARCHIVE_FILE = "archive.json";
@@ -15,12 +15,9 @@ function archivePath(dataDir, pluginId) {
 }
 
 export function loadArchive(dataDir, pluginId) {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(archivePath(dataDir, pluginId), "utf-8"));
-    return normalizeArchive(parsed);
-  } catch {
-    return {};
-  }
+  const parsed = readJsonSafe(archivePath(dataDir, pluginId));
+  if (parsed === undefined) return {};
+  return normalizeArchive(parsed);
 }
 
 export function saveArchive(dataDir, pluginId, archive) {

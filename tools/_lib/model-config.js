@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { writeJsonAtomic } from "./fsutil.js";
+import { readJsonSafe, writeJsonAtomic } from "./fsutil.js";
 
 const HANA_HOME = process.env.HANA_HOME || path.join(os.homedir(), ".hanako");
 const MODELS_JSON = path.join(HANA_HOME, "models.json");
@@ -49,12 +49,9 @@ export function mergeModelConfig(current, patch = {}) {
 }
 
 export function readModelConfig(dataDir, pluginId) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(getModelConfigPath(dataDir, pluginId), "utf-8"));
-    return normalizeModelConfig(raw);
-  } catch {
-    return { ...DEFAULT_MODEL_CONFIG };
-  }
+  const raw = readJsonSafe(getModelConfigPath(dataDir, pluginId));
+  if (raw === undefined) return { ...DEFAULT_MODEL_CONFIG };
+  return normalizeModelConfig(raw);
 }
 
 export function writeModelConfig(dataDir, pluginId, patch) {

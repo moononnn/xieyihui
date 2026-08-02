@@ -3,6 +3,8 @@
 import { state } from "../tools/_lib/state.js";
 import { restartTick, start as startTimer } from "../tools/_lib/timer.js";
 import { writeJsonAtomic } from "../tools/_lib/fsutil.js";
+import { compareVersions, stripVersionPrefix } from "../tools/_lib/version.js";
+import fs from "node:fs";
 import path from "node:path";
 import { ACHIEVEMENTS, loadRecords, markAchievementsViewed, TIER_NAMES, titleFor } from "../tools/_lib/records.js";
 import {
@@ -260,6 +262,65 @@ export default function (app, ctx) {
     return c.json({ ok: true });
   });
 
+  // 检查更新：对比本地 manifest 版本与 GitHub 最新 tag（参考模式 21）
+  const REPO_URL = "https://github.com/moononnn/xieyihui";
+  app.get("/api/check-update", async (c) => {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(ctx.pluginDir, "manifest.json"), "utf-8"));
+      const currentVersion = manifest.version || "0.0.0";
+
+      // 只取最新一个 tag，请求最小化
+      const resp = await fetch("https://api.github.com/repos/moononnn/xieyihui/tags?per_page=1", {
+        headers: { Accept: "application/vnd.github+json", "User-Agent": "xieyihui" },
+        signal: AbortSignal.timeout(8000),
+      });
+
+      // 优雅降级：API 不可用不报错，提示暂时不可用，但仓库地址仍给出
+      if (!resp.ok) {
+        return c.json({ success: true, current: currentVersion, latest: null, hasUpdate: false, message: "GitHub API 暂时不可用（" + resp.status + "）", repoUrl: REPO_URL });
+      }
+
+      const tags = await resp.json();
+      // 还没发过 release：视为最新
+      if (!Array.isArray(tags) || tags.length === 0) {
+        return c.json({ success: true, current: currentVersion, latest: currentVersion, hasUpdate: false, message: "已是最新版本 ✨", repoUrl: REPO_URL });
+      }
+
+      const latestTag = stripVersionPrefix(tags[0].name); // tag 名带 v 前缀也兼容
+      const hasUpdate = compareVersions(latestTag, currentVersion) > 0;
+
+      // 有更新才拉 release 正文，失败不影响主流程
+      let releaseBody = "";
+      if (hasUpdate) {
+        try {
+          const releaseResp = await fetch(`https://api.github.com/repos/moononnn/xieyihui/releases/tags/${tags[0].name}`, {
+            headers: { Accept: "application/vnd.github+json", "User-Agent": "xieyihui" },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (releaseResp.ok) {
+            const release = await releaseResp.json();
+            releaseBody = release.body || "";
+          }
+        } catch { /* release 正文获取失败不影响主流程 */ }
+      }
+
+      return c.json({
+        success: true,
+        current: currentVersion,
+        latest: latestTag,
+        hasUpdate,
+        updateUrl: hasUpdate ? `https://github.com/moononnn/xieyihui/releases/tag/${tags[0].name}` : null,
+        downloadUrl: hasUpdate ? `https://github.com/moononnn/xieyihui/archive/refs/tags/${tags[0].name}.zip` : null,
+        repoUrl: REPO_URL,
+        releaseBody,
+        message: hasUpdate ? `发现新版本 v${latestTag}！当前 v${currentVersion}` : "已是最新版本 ✨",
+      });
+    } catch (error) {
+      ctx.log?.warn?.("检查更新失败", { error: error.message || "网络不可达" });
+      return c.json({ success: false, error: error.message || "网络不可达", repoUrl: REPO_URL });
+    }
+  });
+
 }
 
 function withTimeout(promise, timeoutMs, message = "读取模型配置超时") {
@@ -310,6 +371,12 @@ function renderSettings(ctx) {
     } else if (modelConfig.source === "custom") {
       modelSummaryText = "自定义 API · " + (modelConfig.customModel || "未填写模型");
     }
+  } catch {}
+  // 当前版本号（检查更新用，从 manifest 读）
+  let currentVersion = "0.0.0";
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(ctx.pluginDir, "manifest.json"), "utf-8"));
+    currentVersion = manifest.version || "0.0.0";
   } catch {}
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -391,7 +458,8 @@ h1 { margin: 0 0 6px; color: var(--mint-deep); font-size: 28px; font-weight: 700
   border-radius: 999px; background: var(--pink-soft);
   color: #a85160; font-size: 12px;
 }
-.ach-status { margin-left: auto; background: var(--paper-card); }
+.ach-status { background: var(--paper-card); }
+.status-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .status .ach-badge { box-shadow: 0 0 0 2px var(--mint-soft); }
 .options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .option, .toggle {
@@ -552,6 +620,26 @@ h1 { margin: 0 0 6px; color: var(--mint-deep); font-size: 28px; font-weight: 700
   font-size: 10px; line-height: 16px; text-align: center; padding: 0 4px;
   box-shadow: 0 0 0 2px var(--paper-card);
 }
+.version-chip { font-size: 11px; color: var(--muted); }
+.update-result {
+  margin: -8px 0 16px; padding: 12px 14px;
+  border: 1px dashed var(--line); border-radius: 14px;
+  background: var(--paper-card); font-size: 13px; color: var(--text); line-height: 1.6;
+}
+.update-checking { color: var(--muted); }
+.update-ok { color: var(--mint-deep); }
+.update-err { color: #a85160; }
+.update-card { }
+.update-title { color: var(--mint-deep); font-weight: 700; margin-bottom: 8px; }
+.update-body { color: var(--muted); max-height: 200px; overflow-y: auto; margin-bottom: 10px; font-size: 12px; }
+.update-link { margin-top: 8px; }
+.update-link a { color: var(--mint); }
+.copy-row { margin-top: 8px; }
+.copy-label { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+.copy-input {
+  width: 100%; padding: 8px 10px; font-size: 12px; color: var(--text);
+  background: var(--paper); border: 1px solid var(--line); border-radius: 10px; box-sizing: border-box;
+}
 @keyframes ach-pop { 0% { transform: scale(.96); } 60% { transform: scale(1.02); } 100% { transform: scale(1); } }
 @media (max-width: 520px) {
   .stats-grid { grid-template-columns: 1fr; }
@@ -584,12 +672,20 @@ h1 { margin: 0 0 6px; color: var(--mint-deep); font-size: 28px; font-weight: 700
   </div>
 
   <div class="status"><span class="dot"></span><span class="status-text">${phaseLabel}${pauseSuffix}${state.skippedCount ? ` · 已跳过 ${state.skippedCount} 次` : ""}</span>
-    <button class="entry-button ach-entry ach-status" id="achButton" type="button">
-      <svg class="ach-entry-icon" ${ICON_SVG_ATTRS} aria-hidden="true">${ICONS.trophy}</svg>
-      <span>成就</span>
-      <span class="ach-badge" id="achBadge" hidden>0</span>
-    </button>
+    <span class="status-actions">
+      <button class="entry-button ach-entry" id="updateButton" type="button" title="看看 GitHub 上有没有新版本">
+        <svg class="ach-entry-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+        <span>更新</span>
+      </button>
+      <span class="version-chip" id="versionChip" hidden>v${currentVersion}</span>
+      <button class="entry-button ach-entry ach-status" id="achButton" type="button">
+        <svg class="ach-entry-icon" ${ICON_SVG_ATTRS} aria-hidden="true">${ICONS.trophy}</svg>
+        <span>成就</span>
+        <span class="ach-badge" id="achBadge" hidden>0</span>
+      </button>
+    </span>
   </div>
+  <div class="update-result" id="updateResult" hidden></div>
 
   <h2 class="section-title">计时节奏</h2>
   ${renderOptions("workInterval", "工作间隔", OPTIONS.workInterval.presets, cfg.workInterval, "分钟")}
@@ -970,6 +1066,55 @@ var formatOptionValue = ${formatOptionValue.toString()};
   document.getElementById('achClose').addEventListener('click', function () { achModal.classList.remove('show'); });
   achModal.addEventListener('click', function (event) {
     if (event.target === achModal) achModal.classList.remove('show');
+  });
+
+  // 检查更新：四态处理（检查中 → 失败 / 无更新 / 有更新），每个结果都带可复制的地址框
+  function renderCopyBox(url, label) {
+    return '<div class="copy-row"><div class="copy-label">' + label + '</div>' +
+      '<input class="copy-input" readonly value="' + url + '" onclick="this.select()"></div>';
+  }
+
+  document.getElementById('updateButton').addEventListener('click', function () {
+    var resultEl = document.getElementById('updateResult');
+    var versionChip = document.getElementById('versionChip');
+    if (versionChip) versionChip.hidden = false; // 点击检查更新时才亮出版本号
+    resultEl.hidden = false;
+    resultEl.innerHTML = '<span class="update-checking">↻ 正在检查更新…</span>';
+    api('api/check-update')
+      .then(function (response) {
+        if (!response.ok) throw new Error('请求失败');
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data.success) {
+          resultEl.innerHTML = '<div class="update-err">❌ ' + (data.error || '检查失败') + '</div>' +
+            renderCopyBox(data.repoUrl || 'https://github.com/moononnn/xieyihui', '仓库地址（手动查看最新版）');
+          return;
+        }
+        if (!data.hasUpdate) {
+          resultEl.innerHTML = '<span class="update-ok">' + data.message + '</span>' +
+            renderCopyBox(data.repoUrl, '仓库地址');
+          return;
+        }
+        var html = '<div class="update-card">';
+        html += '<div class="update-title">🎉 ' + data.message + '</div>';
+        if (data.releaseBody) {
+          var body = data.releaseBody
+            .replace(/^###?\\s+(.+)/gm, '<strong>$1</strong>')
+            .replace(/^-\\s+(.+)/gm, '· $1')
+            .replace(/\\n\\n/g, '<br><br>')
+            .replace(/\\n/g, '<br>');
+          html += '<div class="update-body">' + body + '</div>';
+        }
+        html += renderCopyBox(data.downloadUrl, '下载地址（复制到浏览器打开）');
+        html += '<div class="update-link"><a href="' + data.updateUrl + '" target="_blank">查看更新详情 →</a></div>';
+        html += '</div>';
+        resultEl.innerHTML = html;
+      })
+      .catch(function () {
+        resultEl.innerHTML = '<span class="update-err">网络错误</span>' +
+          renderCopyBox('https://github.com/moononnn/xieyihui', '仓库地址（手动查看最新版）');
+      });
   });
 
   // 模型配置弹窗：跟随当前助手 / 从 Hana 已配置模型中选择 / 自定义 API
